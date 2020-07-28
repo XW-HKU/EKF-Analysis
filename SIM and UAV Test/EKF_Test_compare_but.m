@@ -1,0 +1,158 @@
+clc;clear
+syms a b c d g dt real
+global X_def Z_def P Q R;
+global COMP_T;
+COMP_T=0;
+
+%1 read data
+start_time = 59.7;
+end_time   = 100;
+%[pos_in, acc_gryo_in, Q_gt] = bagprocess('subset_2020-01-03-22-00-28.bag');
+acc_gryo_in=csvread('03_07_10_sensor_raw_test_0.csv',1,0);
+acc_gryo_in(:,1)=acc_gryo_in(:,1)./1E6 ;
+ind1=find((acc_gryo_in(:,1)>=start_time)&(acc_gryo_in(:,1)<=end_time));
+acc_gryo_in=acc_gryo_in(ind1,[1 4 5 6 7 8 9]);
+acc_gryo_in(:,1)=acc_gryo_in(:,1);
+
+pos_in=csvread('03_07_10_vehicle_visual_odometry_0.csv',1,0);
+pos_in(:,1)=pos_in(:,1)./1E6;
+ind2=find((pos_in(:,1)>=start_time)&(pos_in(:,1)<=end_time));
+pos_in=pos_in(ind2,[1 2 3 4]);
+pos_in(:,1)=pos_in(:,1);
+
+Q_in=csvread('03_07_10_vehicle_attitude_0.csv',1,0);
+Q_in(:,1)=Q_in(:,1)./1E6;
+ind3=find((Q_in(:,1)>=start_time)&(Q_in(:,1)<=end_time));
+Q_in=Q_in(ind3,[1 5 6 7 8]);
+Q_gt(:,1)=pos_in(:,1);
+Q_gt(:,[2:5])=interp1(Q_in(:,1),Q_in(:,[2:5]),pos_in(:,1),'linear');
+Q_gt(1,[2:5])=Q_gt(2,[2:5]);
+for i=1:length(Q_gt)
+    mag_in(i,1)=Q_gt(i,1);
+    mag_in(i,[2 3 4])=quat2rotm(Q_gt(i,[2:5]))'*[1 0 0]';
+    R_in(:,:,i)=quat2rotm(Q_gt(i,[2:5]));
+    a=Q_gt(i,2);b=Q_gt(i,3);c=Q_gt(i,4);d=Q_gt(i,5);
+    R_in2(:,:,i)=[a*a+b*b-c*c-d*d 2*(b*c-a*d) 2*(a*c+b*d);
+    2*(b*c+a*d)     a*a-b*b+c*c-d*d 2*(c*d-a*b);
+    2*(b*d-a*c)       2*(a*b+c*d)   a*a-b*b-c*c+d*d];
+    Euler_gt(:,i)=[Q_gt(i,1),quat2eul(Q_gt(i,[2:5]))];
+end
+% q0=Q_gt(:,2);q1=Q_gt(:,3);q2=Q_gt(:,4);q3=Q_gt(:,5);
+% mag_in2(:,1)=Q_gt(:,1);
+% mag_in2(:,[2 3 4])=[q0.*q0+q1.*q1-q2.*q2-q3.*q3  2*(q1.*q2+q0.*q3)  2*(q1.*q3-q0.*q2)];
+%2-initiallize
+mag_avg=mean(mag_in([2:1:40],[2 3 4]),1)';
+q=[0.26121423 -0.004823677 -0.009529268 -0.96522176];
+field=quat2rotm(q)*mag_avg;
+G_norm=mean((acc_gryo_in([2:1:100],2).^2+acc_gryo_in([2:1:100],3).^2+acc_gryo_in([2:1:100],4).^2).^0.5);
+
+%% 2-start EKF
+%X_def=[v;q;omega;a_s;a_s_1;a_s_2;a_s_3;tau;tau_1;tau_2;tau_3;ba;bg;bm;l_ic;g];
+%Z=[m_v;m_a;m_omega;m_m];
+pos_start=[pos_in(1,2) pos_in(1,3) pos_in(1,4)]';
+Q_start=[Q_gt(1,2) Q_gt(1,3) Q_gt(1,4) Q_gt(1,5)]';
+X_out(:,1)=zeros(42,1);X_out(9,1)=-9.8;
+RotMatrix(:,:,1)=eye(3);
+X_prid(:,1)=X_out(:,1);
+Cur_T(1)=min(acc_gryo_in(1,1),mag_in(1,1));
+
+i=2;
+mag_index=1;
+iter_index=2;
+Dt(iter_index)=0;
+P_in=eye(length(X_out));
+Euler(:,1)=quat2eul(Q_start');
+Euler_gt(:,1)=[0;quat2eul(Q_start')'];
+P_prid=zeros(length(X_out),length(X_out),length(acc_gryo_in)-1);
+P_next=zeros(length(X_out),length(X_out),length(acc_gryo_in)-1);
+F_now=zeros(length(X_out),length(X_out),length(acc_gryo_in)-1);
+P_prid(:,:,1)=eye(length(X_out));
+P_next(:,:,1)=eye(length(X_out));
+F_now(:,:,1) =eye(length(X_out));
+
+while i<length(acc_gryo_in)-1
+    if mag_index<=1
+        Z_in(:,iter_index)=[pos_start;[acc_gryo_in(i-1,2) acc_gryo_in(i-1,3) acc_gryo_in(i-1,4)]';[acc_gryo_in(i-1,5) acc_gryo_in(i-1,6) acc_gryo_in(i-1,7)]';[mag_in(1,2) mag_in(1,3) mag_in(1,4)]'];
+    else
+        Z_in(:,iter_index)=[[pos_in(mag_index,2) pos_in(mag_index,3) pos_in(mag_index,4)]';[acc_gryo_in(i-1,2) acc_gryo_in(i-1,3) acc_gryo_in(i-1,4)]';[acc_gryo_in(i-1,5) acc_gryo_in(i-1,6) acc_gryo_in(i-1,7)]';[mag_in(mag_index,2) mag_in(mag_index,3) mag_in(mag_index,4)]'];
+    end
+    
+    if(mag_index==length(mag_in))
+        Cur_T(iter_index)=acc_gryo_in(i,1);
+        flag='acc_gy';
+        i=i+1;
+    elseif(acc_gryo_in(i,1)<=mag_in(mag_index,1))
+        Cur_T(iter_index)=acc_gryo_in(i,1);
+        flag='acc_gy';
+        i=i+1;
+    else
+        flag='mag';
+        Cur_T(iter_index)=mag_in(mag_index,1);
+        mag_index=mag_index+1;
+    end
+    
+    Dt=Cur_T(iter_index)-Cur_T(iter_index-1);
+    
+    Use_states=1;
+    if (Use_states==1)
+        [X_prid(:,iter_index),X_out(:,iter_index),RotMatrix(:,:,iter_index),P_prid(:,:,iter_index),P_next(:,:,iter_index),F_now(:,:,iter_index)]=System_Mode(X_out(:,iter_index-1),RotMatrix(:,:,iter_index-1),Z_in(:,iter_index),P_in,Dt,flag);
+        name='our-states';
+    else
+        [X_prid(:,iter_index),X_out(:,iter_index),RotMatrix(:,:,iter_index),P_prid(:,:,iter_index),P_next(:,:,iter_index),F_now(:,:,iter_index)]=System_Mode_all_inputs(X_out(:,iter_index-1),RotMatrix(:,:,iter_index-1),Z_in(:,iter_index),P_in,Dt,flag);
+        name='our-inputs'
+    end
+    P_in=P_next(:,:,iter_index);
+    Euler(:,iter_index)=rotm2eul(RotMatrix(:,:,iter_index));
+    Euler_gt(:,mag_index)=[Cur_T(iter_index);quat2eul(Q_gt(mag_index,[2 3 4 5]))'];
+    m_p_f(:,iter_index)=X_out(1:3,iter_index)+RotMatrix(:,:,iter_index)*X_out(end-5:end-3,iter_index);
+    iter_index=iter_index+1;
+end
+COMP_T
+
+%% normal filter
+[b,a] = butter(1,30/800);
+freqz(b,a);
+gyr_butfilt(:,1) = filter(b,a,acc_gryo_in(:,5));
+gyr_butfilt(:,2) = filter(b,a,acc_gryo_in(:,6));
+gyr_butfilt(:,3) = filter(b,a,acc_gryo_in(:,7));
+
+[b,a] = butter(1,10/800);
+freqz(b,a);
+acc_butfilt(:,1) = filter(b,a,acc_gryo_in(:,2));
+acc_butfilt(:,2) = filter(b,a,acc_gryo_in(:,3));
+acc_butfilt(:,3) = filter(b,a,acc_gryo_in(:,4));
+%plot(acc_gryo_in(:,2),)
+
+d1 = designfilt('lowpassiir','FilterOrder',1, ...
+    'HalfPowerFrequency',40/800,'DesignMethod','butter');
+gyr_zerofilt(:,1) = filtfilt(d1,acc_gryo_in(:,5));
+gyr_zerofilt(:,2) = filtfilt(d1,acc_gryo_in(:,6));
+gyr_zerofilt(:,3) = filtfilt(d1,acc_gryo_in(:,7));
+acc_zerofilt(:,1) = filtfilt(d1,acc_gryo_in(:,2));
+acc_zerofilt(:,2) = filtfilt(d1,acc_gryo_in(:,3));
+acc_zerofilt(:,3) = filtfilt(d1,acc_gryo_in(:,4));
+
+% smoother
+N=length(X_out);
+X_smooth=X_out;
+%P_smooth=P_next;
+Euler_smooth=Euler;
+
+%% plot
+figure(1)
+set(gcf,'outerposition',get(0,'screensize'));
+% omega
+subplot(2,1,1)
+plot(Cur_T,Z_in(7,:));hold on;plot(acc_gryo_in(:,1),gyr_butfilt(:,1));hold on;plot(acc_gryo_in(:,1),gyr_zerofilt(:,1));hold on;plot(Cur_T,X_out(19,:)+X_out(34,:));legend('origin','buttworth','zero-phase',name );title('angular rate X');
+% subplot(2,3,2)
+% plot(Cur_T,Z_in(8,:));hold on;plot(acc_gryo_in(:,1),gyr_butfilt(:,2));hold on;plot(Cur_T,X_out(20,:));legend('origin','buttworth',name );title('angular rate Y');
+% subplot(2,3,3)
+% plot(Cur_T,Z_in(9,:));hold on;plot(acc_gryo_in(:,1),gyr_butfilt(:,3));hold on;plot(Cur_T,X_out(21,:));legend('origin','buttworth',name );title('angular rate Z');
+% a_s
+% subplot(2,3,4)
+% plot(Cur_T,Z_in(4,:));hold on;plot(acc_gryo_in(:,1),acc_butfilt(:,1));hold on;plot(Cur_T,X_out(7,:));legend('origin','buttworth',name );title('acc X');
+% subplot(2,3,5)
+% plot(Cur_T,Z_in(5,:));hold on;plot(acc_gryo_in(:,1),acc_butfilt(:,2));hold on;plot(Cur_T,X_out(8,:));legend('origin','buttworth',name );title('acc Y');
+subplot(2,1,2)
+plot(Cur_T,Z_in(6,:));hold on;plot(acc_gryo_in(:,1),acc_butfilt(:,3));hold on;plot(acc_gryo_in(:,1),acc_zerofilt(:,3));hold on;plot(Cur_T,X_out(9,:)+X_out(33,:));legend('origin','buttworth','zero-phase',name );title('acc Z');
+
